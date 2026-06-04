@@ -7,26 +7,39 @@ from werkzeug.utils import secure_filename
 from PIL import Image
 import io, base64
 import traceback
+import sys
+import time
+import gc
 from scipy import ndimage
 from skimage import measure, filters, morphology
 
 # ============================================
-# PRODUCTION CONFIGURATION
+# PRODUCTION CONFIGURATION FOR RENDER
 # ============================================
-UPLOAD_FOLDER = "/tmp/uploads"  # Use /tmp for Render (ephemeral storage)
+
+UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300MB max
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB limit for Render free tier
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "neurovision-secret-key-production")
-
-# For Render, we need to handle large files
-app.config["REQUEST_TIMEOUT"] = 120
+app.config["REQUEST_TIMEOUT"] = 60
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
-# Rest of your existing code continues here...
-# (Keep all your existing functions - detect_hippocampus_improved, 
-#  detect_ventricles_improved, detect_wmh_improved, etc.)
+# Health check endpoint for Render
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy", "message": "NeuroVision AI is running"}), 200
+
+# Wakeup endpoint to prevent cold starts
+@app.route("/wakeup")
+def wakeup():
+    return jsonify({"status": "awake", "timestamp": time.time()}), 200
+
+# Error handler for large files
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({"error": "File too large. Maximum size is 100MB"}), 413
 
 # Typical voxel volume for brain MRI (1mm x 1mm x 1mm = 1 mm³)
 VOXEL_VOLUME_MM3 = 1.0
@@ -280,9 +293,6 @@ def detect_hippocampus_alternative(volume):
         return {'left': 0, 'right': 0}, {'left': None, 'right': None}
 
 
-# -------------------------
-# FIXED VENTRICLE DETECTION - MORE ROBUST
-# -------------------------
 # -------------------------
 # FIXED VENTRICLE DETECTION - DATA-DRIVEN WITH VARYING RESULTS
 # -------------------------
@@ -621,7 +631,8 @@ def generate_view(vol, seg, axis, alz_mask=None, hippocampus_mask=None):
         plain, over, over_alz, over_hippo = [], [], [], []
         slice_pixels = []
         
-        num_slices = min(vol_uint8.shape[0], 200)
+        # Limit number of slices for Render performance
+        num_slices = min(vol_uint8.shape[0], 100)
         
         for i in range(num_slices):
             b = vol_uint8[i]
@@ -707,11 +718,23 @@ def index():
 # -------------------------
 @app.route("/upload", methods=["POST"])
 def upload():
+    start_time = time.time()
+    
     try:
         files = request.files.getlist("files")
         
         if not files:
             return jsonify({"error": "No files uploaded"}), 400
+        
+        # Check total file size
+        total_size = 0
+        for f in files:
+            f.seek(0, os.SEEK_END)
+            total_size += f.tell()
+            f.seek(0)
+        
+        if total_size > 100 * 1024 * 1024:  # 100MB limit
+            return jsonify({"error": "Total file size exceeds 100MB limit"}), 413
         
         flair_path = None
         seg_path = None
@@ -735,18 +758,36 @@ def upload():
         
         print(f"\n{'='*50}")
         print(f"Processing: {flair_path}")
+        print(f"Time: {time.time() - start_time:.2f}s")
         print(f"{'='*50}")
         
         # Load and preprocess
         raw_volume = load_nifti(flair_path)
+        
+        # Downsample volume if too large (Render memory optimization)
+        max_voxels = 30 * 1024 * 1024  # 30 million voxels max
+        if raw_volume.size > max_voxels:
+            print(f"Volume too large ({raw_volume.size} voxels), downsampling...")
+            from scipy.ndimage import zoom
+            scale_factor = (max_voxels / raw_volume.size) ** (1/3)
+            scale_factor = max(0.5, min(0.8, scale_factor))
+            new_shape = tuple(int(dim * scale_factor) for dim in raw_volume.shape)
+            raw_volume = zoom(raw_volume, scale_factor, order=1)
+            print(f"Downsampled to {raw_volume.shape}")
+        
         vol_normalized = normalize(raw_volume)
         
         # Load segmentation if provided
         seg = None
         if seg_path:
-            seg_data = load_nifti(seg_path)
-            seg = (seg_data > 0).astype(np.uint8)
-            print(f"Segmentation loaded")
+            try:
+                seg_data = load_nifti(seg_path)
+                seg = (seg_data > 0).astype(np.uint8)
+                print(f"Segmentation loaded")
+            except Exception as e:
+                print(f"Error loading segmentation: {e}")
+        
+        print(f"Preprocessing time: {time.time() - start_time:.2f}s")
         
         # Alzheimer's detection
         hippocampus_volumes, hippocampus_mask = detect_hippocampus_improved(vol_normalized)
@@ -771,12 +812,15 @@ def upload():
         print(f"  Ventricle Volume:  {ventricle_volume:.0f} mm³")
         print(f"  WMH Lesions:       {wmh_count}")
         print(f"  Risk Score:        {atrophy_results['score']}% ({atrophy_results['risk_level']})")
+        print(f"Total time: {time.time() - start_time:.2f}s")
         print(f"{'='*50}\n")
         
         # Combine masks for visualization
         alz_combined = np.zeros_like(vol_normalized, dtype=np.uint8)
-        alz_combined[ventricle_mask > 0] = 1  # Ventricles
-        alz_combined[wmh_mask > 0] = 2        # WMH
+        if ventricle_mask is not None:
+            alz_combined[ventricle_mask > 0] = 1  # Ventricles
+        if wmh_mask is not None:
+            alz_combined[wmh_mask > 0] = 2        # WMH
         
         # Generate views
         axial = generate_view(vol_normalized, seg, 2, alz_combined, hippocampus_mask)
@@ -835,11 +879,15 @@ def upload():
         # Convert any remaining numpy types to Python natives
         response_data = convert_to_native(response_data)
         
+        # Force garbage collection
+        gc.collect()
+        
         return jsonify(response_data)
         
     except Exception as e:
         print(f"Upload error: {e}")
         traceback.print_exc()
+        gc.collect()
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 
