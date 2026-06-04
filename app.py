@@ -16,7 +16,7 @@ UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB limit for Render
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 app.config["SECRET_KEY"] = "neurovision-secret-key"
 
 # Health check for Render
@@ -30,12 +30,11 @@ NORMAL_HIPPOCAMPUS_SINGLE = 1100
 NORMAL_VENTRICLE = 2500
 NORMAL_WMH_COUNT = 10
 
-# Voxel volume (will be updated from NIfTI)
 VOXEL_VOLUME_MM3 = 1.0
 
 
 def convert_to_native(obj):
-    """Convert numpy types to Python native types for JSON serialization"""
+    """Convert numpy types to Python native types"""
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
@@ -52,7 +51,7 @@ def convert_to_native(obj):
 
 
 # -------------------------
-# LOAD NIFTI (SAME AS WORKING CODE)
+# LOAD NIFTI
 # -------------------------
 def load_nifti(path):
     img = nib.load(path)
@@ -65,7 +64,7 @@ def load_nifti(path):
 
 
 # -------------------------
-# NORMALIZE (SAME AS WORKING CODE)
+# NORMALIZE
 # -------------------------
 def normalize(volume):
     volume = volume.astype(np.float32)
@@ -84,7 +83,7 @@ def to_uint8(volume):
 
 
 # -------------------------
-# CONVERT TO BASE64 (SAME AS WORKING CODE)
+# CONVERT TO BASE64
 # -------------------------
 def to_b64(img):
     buf = io.BytesIO()
@@ -93,7 +92,7 @@ def to_b64(img):
 
 
 # -------------------------
-# OVERLAY (SAME AS WORKING CODE, WITH COLOR SUPPORT)
+# OVERLAY
 # -------------------------
 def overlay(base, mask, color=[255, 0, 0]):
     rgb = np.stack([base, base, base], axis=-1)
@@ -105,16 +104,14 @@ def overlay(base, mask, color=[255, 0, 0]):
 
 
 # -------------------------
-# SIMPLE HIPPOCAMPUS DETECTION (LIGHTWEIGHT)
+# HIPPOCAMPUS DETECTION
 # -------------------------
-def detect_hippocampus_simple(volume):
-    """Lightweight hippocampus detection for Render"""
+def detect_hippocampus(volume):
     try:
         z_size = volume.shape[2]
         y_size = volume.shape[1]
         x_size = volume.shape[0]
         
-        # Anatomical location
         z_start = int(z_size * 0.45)
         z_end = int(z_size * 0.65)
         y_start = int(y_size * 0.55)
@@ -122,36 +119,43 @@ def detect_hippocampus_simple(volume):
         
         mid_x = x_size // 2
         
-        hippocampus_volumes = {'left': 1100.0, 'right': 1100.0}
+        left_vol = 1100.0
+        right_vol = 1100.0
         
-        # Try to detect based on intensity
-        for side, (x_start_idx, x_end_idx) in [('left', (0, mid_x)), ('right', (mid_x, x_size))]:
-            candidate = volume[x_start_idx:x_end_idx, y_start:y_end, z_start:z_end]
-            if candidate.size > 0:
-                threshold = np.percentile(candidate, 70)
-                mask_3d = candidate > threshold
-                if np.sum(mask_3d) > 100:
-                    vol_mm3 = np.sum(mask_3d) * VOXEL_VOLUME_MM3
-                    if 200 < vol_mm3 < 2500:
-                        hippocampus_volumes[side] = vol_mm3
+        # Left hippocampus
+        candidate = volume[0:mid_x, y_start:y_end, z_start:z_end]
+        if candidate.size > 0:
+            threshold = np.percentile(candidate, 70)
+            mask_3d = candidate > threshold
+            if np.sum(mask_3d) > 100:
+                vol = np.sum(mask_3d) * VOXEL_VOLUME_MM3
+                if 200 < vol < 2500:
+                    left_vol = vol
         
-        total = hippocampus_volumes['left'] + hippocampus_volumes['right']
-        return hippocampus_volumes, total
+        # Right hippocampus
+        candidate = volume[mid_x:x_size, y_start:y_end, z_start:z_end]
+        if candidate.size > 0:
+            threshold = np.percentile(candidate, 70)
+            mask_3d = candidate > threshold
+            if np.sum(mask_3d) > 100:
+                vol = np.sum(mask_3d) * VOXEL_VOLUME_MM3
+                if 200 < vol < 2500:
+                    right_vol = vol
+        
+        return {'left': left_vol, 'right': right_vol}, left_vol + right_vol
         
     except Exception as e:
-        print(f"Hippocampus detection error: {e}")
+        print(f"Hippocampus error: {e}")
         return {'left': 1100.0, 'right': 1100.0}, 2200.0
 
 
 # -------------------------
-# SIMPLE VENTRICLE DETECTION (LIGHTWEIGHT)
+# VENTRICLE DETECTION
 # -------------------------
-def detect_ventricles_simple(volume):
-    """Lightweight ventricle detection for Render"""
+def detect_ventricles(volume):
     try:
         x_size, y_size, z_size = volume.shape
         
-        # Central region
         x_start = int(x_size * 0.35)
         x_end = int(x_size * 0.65)
         y_start = int(y_size * 0.30)
@@ -165,26 +169,23 @@ def detect_ventricles_simple(volume):
             threshold = np.percentile(central_region, 20)
             mask_3d = central_region < threshold
             if np.sum(mask_3d) > 200:
-                ventricle_volume = np.sum(mask_3d) * VOXEL_VOLUME_MM3
-                if 500 < ventricle_volume < 10000:
-                    return ventricle_volume
+                volume_mm3 = np.sum(mask_3d) * VOXEL_VOLUME_MM3
+                if 500 < volume_mm3 < 10000:
+                    return volume_mm3
         
-        # Estimate based on brain volume
         brain_volume = volume.size * VOXEL_VOLUME_MM3
         estimated = brain_volume * 0.008
-        estimated = max(1500, min(5000, estimated))
-        return estimated
+        return max(1500, min(5000, estimated))
         
     except Exception as e:
-        print(f"Ventricle detection error: {e}")
+        print(f"Ventricle error: {e}")
         return 2500.0
 
 
 # -------------------------
-# SIMPLE WMH DETECTION (LIGHTWEIGHT)
+# WMH DETECTION
 # -------------------------
-def detect_wmh_simple(volume):
-    """Lightweight WMH detection for Render"""
+def detect_wmh(volume):
     try:
         mean_intensity = np.mean(volume)
         std_intensity = np.std(volume)
@@ -199,7 +200,7 @@ def detect_wmh_simple(volume):
         return wmh_mask.astype(np.uint8), wmh_volume, lesion_count
         
     except Exception as e:
-        print(f"WMH detection error: {e}")
+        print(f"WMH error: {e}")
         return np.zeros_like(volume, dtype=np.uint8), 0.0, 0
 
 
@@ -209,7 +210,6 @@ def detect_wmh_simple(volume):
 def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     total_hippo = left_hippo + right_hippo
     
-    # Hippocampus score
     hippo_ratio = total_hippo / NORMAL_HIPPOCAMPUS_TOTAL
     if hippo_ratio < 0.7:
         hippo_score = 80
@@ -220,7 +220,6 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         hippo_score = 10
     
-    # Asymmetry score
     if max(left_hippo, right_hippo, 1) > 0:
         asymmetry = abs(left_hippo - right_hippo) / max(left_hippo, right_hippo, 1) * 100
     else:
@@ -233,7 +232,6 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         asymmetry_score = 5
     
-    # Ventricle score
     ventricle_ratio = ventricle_volume / NORMAL_VENTRICLE
     if ventricle_ratio > 1.5:
         ventricle_score = 70
@@ -244,7 +242,6 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         ventricle_score = 5
     
-    # WMH score
     if wmh_count > 25:
         wmh_score = 60
     elif wmh_count > 15:
@@ -254,7 +251,6 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         wmh_score = 5
     
-    # Combined score
     combined = (hippo_score * 0.5) + (asymmetry_score * 0.15) + (ventricle_score * 0.2) + (wmh_score * 0.15)
     combined = min(100, combined)
     
@@ -273,9 +269,9 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
 
 
 # -------------------------
-# GENERATE VIEW (SAME AS WORKING CODE, WITH OVERLAYS)
+# GENERATE VIEW
 # -------------------------
-def generate_view(vol, seg, axis, alz_mask=None, hippo_mask=None):
+def generate_view(vol, seg, axis):
     vol_uint8 = to_uint8(vol)
     vol_uint8 = np.moveaxis(vol_uint8, axis, 0)
     
@@ -284,15 +280,9 @@ def generate_view(vol, seg, axis, alz_mask=None, hippo_mask=None):
     else:
         seg = None
     
-    if alz_mask is not None:
-        alz_mask = np.moveaxis(alz_mask, axis, 0)
-    if hippo_mask is not None:
-        hippo_mask = np.moveaxis(hippo_mask, axis, 0)
-    
-    plain, over, over_alz, over_hippo = [], [], [], []
+    plain, over = [], []
     slice_pixels = []
     
-    # Limit slices for performance
     num_slices = min(vol_uint8.shape[0], 100)
     
     for i in range(num_slices):
@@ -304,31 +294,10 @@ def generate_view(vol, seg, axis, alz_mask=None, hippo_mask=None):
         
         plain.append(to_b64(b))
         over.append(to_b64(overlay(b, m, [255, 0, 0])))
-        
-        # Alzheimer's overlay (ventricles in cyan, WMH in yellow)
-        if alz_mask is not None and i < len(alz_mask):
-            alz_img = np.stack([b, b, b], axis=-1)
-            ventricle_pixels = (alz_mask[i] == 1)
-            wmh_pixels = (alz_mask[i] == 2)
-            if np.any(ventricle_pixels):
-                alz_img[ventricle_pixels] = [0, 255, 255]
-            if np.any(wmh_pixels):
-                alz_img[wmh_pixels] = [255, 255, 0]
-            over_alz.append(to_b64(alz_img))
-        else:
-            over_alz.append(None)
-        
-        # Hippocampus overlay (green)
-        if hippo_mask is not None and i < len(hippo_mask):
-            over_hippo.append(to_b64(overlay(b, hippo_mask[i], [0, 255, 0])))
-        else:
-            over_hippo.append(None)
     
     return {
         "plain": plain,
         "overlay": over,
-        "alzheimers_overlay": over_alz,
-        "hippocampus_overlay": over_hippo,
         "stats": {
             "total_pixels": int(sum(slice_pixels)) if slice_pixels else 0,
             "max_slice_pixels": int(max(slice_pixels)) if slice_pixels else 0,
@@ -346,7 +315,7 @@ def index():
 
 
 # -------------------------
-# UPLOAD (SIMPLIFIED LIKE WORKING CODE)
+# UPLOAD
 # -------------------------
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -377,7 +346,7 @@ def upload():
         
         print(f"Processing: {os.path.basename(flair_path)}")
         
-        # Load and normalize (same as working code)
+        # Load and normalize
         raw_volume = load_nifti(flair_path)
         vol_normalized = normalize(raw_volume)
         
@@ -387,25 +356,20 @@ def upload():
             seg_data = load_nifti(seg_path)
             seg = (seg_data > 0).astype(np.uint8)
         
-        # Alzheimer's detection (lightweight)
-        hippocampus_volumes, total_hippo = detect_hippocampus_simple(vol_normalized)
+        # Alzheimer's detection
+        hippocampus_volumes, total_hippo = detect_hippocampus(vol_normalized)
         left_hippo = hippocampus_volumes['left']
         right_hippo = hippocampus_volumes['right']
         
-        ventricle_volume = detect_ventricles_simple(vol_normalized)
-        wmh_mask, wmh_volume, wmh_count = detect_wmh_simple(vol_normalized)
+        ventricle_volume = detect_ventricles(vol_normalized)
+        wmh_mask, wmh_volume, wmh_count = detect_wmh(vol_normalized)
         
         risk_results = calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count)
         
-        # Create masks for visualization (simple)
-        ventricle_mask = np.zeros_like(vol_normalized, dtype=np.uint8)
-        alz_combined = np.zeros_like(vol_normalized, dtype=np.uint8)
-        alz_combined[wmh_mask > 0] = 2
-        
         # Generate views
-        axial = generate_view(vol_normalized, seg, 2, alz_combined, None)
-        sagittal = generate_view(vol_normalized, seg, 0, alz_combined, None)
-        coronal = generate_view(vol_normalized, seg, 1, alz_combined, None)
+        axial = generate_view(vol_normalized, seg, 2)
+        sagittal = generate_view(vol_normalized, seg, 0)
+        coronal = generate_view(vol_normalized, seg, 1)
         
         stats = axial["stats"]
         
@@ -456,13 +420,10 @@ def upload():
             }
         }
         
-        # Convert numpy types to Python natives
         response_data = convert_to_native(response_data)
-        
-        # Force garbage collection
         gc.collect()
         
-        print(f"Total processing time: {time.time() - start_time:.2f}s")
+        print(f"Total time: {time.time() - start_time:.2f}s")
         
         return jsonify(response_data)
         
@@ -480,4 +441,4 @@ if __name__ == "__main__":
     print("\nServer starting at http://localhost:5000")
     print("="*60 + "\n")
     
-    app.run(host="0.0.0.0", port=5000, debug=True) 
+    app.run(host="0.0.0.0", port=5000, debug=True)
