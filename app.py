@@ -10,12 +10,23 @@ import traceback
 from scipy import ndimage
 from skimage import measure, filters, morphology
 
-UPLOAD_FOLDER = "uploads"
+# ============================================
+# PRODUCTION CONFIGURATION
+# ============================================
+UPLOAD_FOLDER = "/tmp/uploads"  # Use /tmp for Render (ephemeral storage)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
-app.config["SECRET_KEY"] = "neurovision-secret-key"
+app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300MB max
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "neurovision-secret-key-production")
+
+# For Render, we need to handle large files
+app.config["REQUEST_TIMEOUT"] = 120
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+# Rest of your existing code continues here...
+# (Keep all your existing functions - detect_hippocampus_improved, 
+#  detect_ventricles_improved, detect_wmh_improved, etc.)
 
 # Typical voxel volume for brain MRI (1mm x 1mm x 1mm = 1 mm³)
 VOXEL_VOLUME_MM3 = 1.0
