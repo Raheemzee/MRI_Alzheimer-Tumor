@@ -1,0 +1,8 @@
+flask
+pydicom
+numpy
+nibabel
+scipy
+gunicorn
+Pillow
+werkzeug
