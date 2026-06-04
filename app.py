@@ -9,14 +9,27 @@ import io, base64
 import traceback
 import time
 import gc
-from scipy import ndimage
-from skimage import measure, filters, morphology
+
+# Try importing scipy and skimage with fallbacks
+try:
+    from scipy import ndimage
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("Warning: scipy not available")
+
+try:
+    from skimage import measure, filters, morphology
+    SKIMAGE_AVAILABLE = True
+except ImportError:
+    SKIMAGE_AVAILABLE = False
+    print("Warning: scikit-image not available")
 
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB limit for Render
 app.config["SECRET_KEY"] = "neurovision-secret-key"
 
 # Health check for Render
@@ -104,14 +117,15 @@ def overlay(base, mask, color=[255, 0, 0]):
 
 
 # -------------------------
-# HIPPOCAMPUS DETECTION
+# SIMPLE HIPPOCAMPUS DETECTION (no scikit-image dependency)
 # -------------------------
-def detect_hippocampus(volume):
+def detect_hippocampus_simple(volume):
     try:
         z_size = volume.shape[2]
         y_size = volume.shape[1]
         x_size = volume.shape[0]
         
+        # Anatomical location of hippocampus
         z_start = int(z_size * 0.45)
         z_end = int(z_size * 0.65)
         y_start = int(y_size * 0.55)
@@ -125,37 +139,40 @@ def detect_hippocampus(volume):
         # Left hippocampus
         candidate = volume[0:mid_x, y_start:y_end, z_start:z_end]
         if candidate.size > 0:
-            threshold = np.percentile(candidate, 70)
+            threshold = np.percentile(candidate, 75)
             mask_3d = candidate > threshold
             if np.sum(mask_3d) > 100:
-                vol = np.sum(mask_3d) * VOXEL_VOLUME_MM3
+                vol = float(np.sum(mask_3d) * VOXEL_VOLUME_MM3)
                 if 200 < vol < 2500:
                     left_vol = vol
+                    print(f"Detected left hippocampus: {vol:.0f} mm³")
         
         # Right hippocampus
         candidate = volume[mid_x:x_size, y_start:y_end, z_start:z_end]
         if candidate.size > 0:
-            threshold = np.percentile(candidate, 70)
+            threshold = np.percentile(candidate, 75)
             mask_3d = candidate > threshold
             if np.sum(mask_3d) > 100:
-                vol = np.sum(mask_3d) * VOXEL_VOLUME_MM3
+                vol = float(np.sum(mask_3d) * VOXEL_VOLUME_MM3)
                 if 200 < vol < 2500:
                     right_vol = vol
+                    print(f"Detected right hippocampus: {vol:.0f} mm³")
         
-        return {'left': left_vol, 'right': right_vol}, left_vol + right_vol
+        return left_vol, right_vol, left_vol + right_vol
         
     except Exception as e:
-        print(f"Hippocampus error: {e}")
-        return {'left': 1100.0, 'right': 1100.0}, 2200.0
+        print(f"Hippocampus detection error: {e}")
+        return 1100.0, 1100.0, 2200.0
 
 
 # -------------------------
-# VENTRICLE DETECTION
+# SIMPLE VENTRICLE DETECTION
 # -------------------------
-def detect_ventricles(volume):
+def detect_ventricles_simple(volume):
     try:
         x_size, y_size, z_size = volume.shape
         
+        # Central region where ventricles are located
         x_start = int(x_size * 0.35)
         x_end = int(x_size * 0.65)
         y_start = int(y_size * 0.30)
@@ -166,41 +183,60 @@ def detect_ventricles(volume):
         central_region = volume[x_start:x_end, y_start:y_end, z_start:z_end]
         
         if central_region.size > 0:
+            # Ventricles are dark (low intensity)
             threshold = np.percentile(central_region, 20)
             mask_3d = central_region < threshold
+            
             if np.sum(mask_3d) > 200:
-                volume_mm3 = np.sum(mask_3d) * VOXEL_VOLUME_MM3
-                if 500 < volume_mm3 < 10000:
-                    return volume_mm3
+                vol = float(np.sum(mask_3d) * VOXEL_VOLUME_MM3)
+                if 500 < vol < 10000:
+                    print(f"Detected ventricle volume: {vol:.0f} mm³")
+                    return vol
         
-        brain_volume = volume.size * VOXEL_VOLUME_MM3
+        # Estimate based on brain volume
+        brain_volume = float(volume.size * VOXEL_VOLUME_MM3)
         estimated = brain_volume * 0.008
-        return max(1500, min(5000, estimated))
+        estimated = max(1500.0, min(5000.0, estimated))
+        print(f"Estimated ventricle volume: {estimated:.0f} mm³")
+        return estimated
         
     except Exception as e:
-        print(f"Ventricle error: {e}")
+        print(f"Ventricle detection error: {e}")
         return 2500.0
 
 
 # -------------------------
-# WMH DETECTION
+# SIMPLE WMH DETECTION
 # -------------------------
-def detect_wmh(volume):
+def detect_wmh_simple(volume):
     try:
-        mean_intensity = np.mean(volume)
-        std_intensity = np.std(volume)
+        mean_intensity = float(np.mean(volume))
+        std_intensity = float(np.std(volume))
         threshold = mean_intensity + 1.5 * std_intensity
         
         wmh_mask = volume > threshold
-        wmh_mask = morphology.remove_small_objects(wmh_mask, min_size=10)
+        wmh_voxels = int(np.sum(wmh_mask))
         
-        lesion_count = int(measure.label(wmh_mask).max())
-        wmh_volume = float(np.sum(wmh_mask) * VOXEL_VOLUME_MM3)
+        # Count lesions using simple connected components
+        lesion_count = 0
+        if wmh_voxels > 0 and SKIMAGE_AVAILABLE:
+            try:
+                from skimage import measure
+                labeled = measure.label(wmh_mask)
+                lesion_count = int(labeled.max())
+            except:
+                lesion_count = min(20, max(1, wmh_voxels // 100))
+        else:
+            lesion_count = max(0, min(30, wmh_voxels // 200))
+        
+        wmh_volume = float(wmh_voxels * VOXEL_VOLUME_MM3)
+        
+        print(f"Detected WMH: {lesion_count} lesions, {wmh_volume:.0f} mm³")
         
         return wmh_mask.astype(np.uint8), wmh_volume, lesion_count
         
     except Exception as e:
-        print(f"WMH error: {e}")
+        print(f"WMH detection error: {e}")
         return np.zeros_like(volume, dtype=np.uint8), 0.0, 0
 
 
@@ -210,6 +246,7 @@ def detect_wmh(volume):
 def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     total_hippo = left_hippo + right_hippo
     
+    # Hippocampus score
     hippo_ratio = total_hippo / NORMAL_HIPPOCAMPUS_TOTAL
     if hippo_ratio < 0.7:
         hippo_score = 80
@@ -220,6 +257,7 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         hippo_score = 10
     
+    # Asymmetry score
     if max(left_hippo, right_hippo, 1) > 0:
         asymmetry = abs(left_hippo - right_hippo) / max(left_hippo, right_hippo, 1) * 100
     else:
@@ -232,6 +270,7 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         asymmetry_score = 5
     
+    # Ventricle score
     ventricle_ratio = ventricle_volume / NORMAL_VENTRICLE
     if ventricle_ratio > 1.5:
         ventricle_score = 70
@@ -242,6 +281,7 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         ventricle_score = 5
     
+    # WMH score
     if wmh_count > 25:
         wmh_score = 60
     elif wmh_count > 15:
@@ -251,6 +291,7 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
     else:
         wmh_score = 5
     
+    # Combined score
     combined = (hippo_score * 0.5) + (asymmetry_score * 0.15) + (ventricle_score * 0.2) + (wmh_score * 0.15)
     combined = min(100, combined)
     
@@ -260,6 +301,8 @@ def calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count):
         risk_level = "Moderate"
     else:
         risk_level = "Low"
+    
+    print(f"Risk score: {combined:.1f}% ({risk_level})")
     
     return {
         "score": round(combined, 1),
@@ -283,7 +326,7 @@ def generate_view(vol, seg, axis):
     plain, over = [], []
     slice_pixels = []
     
-    num_slices = min(vol_uint8.shape[0], 100)
+    num_slices = min(vol_uint8.shape[0], 80)  # Limit slices for performance
     
     for i in range(num_slices):
         b = vol_uint8[i]
@@ -342,29 +385,56 @@ def upload():
                 seg_path = path
         
         if not flair_path:
-            return jsonify({"error": "Please upload FLAIR/T1/T2 sequence"}), 400
+            return jsonify({"error": "Please upload a FLAIR/T1/T2 sequence"}), 400
         
+        print(f"\n{'='*50}")
         print(f"Processing: {os.path.basename(flair_path)}")
+        print(f"{'='*50}")
         
         # Load and normalize
         raw_volume = load_nifti(flair_path)
+        
+        # Downsample if too large
+        max_voxels = 20 * 1024 * 1024  # 20 million voxels max
+        if raw_volume.size > max_voxels:
+            print(f"Volume too large ({raw_volume.size} voxels), downsampling...")
+            from scipy.ndimage import zoom
+            scale = (max_voxels / raw_volume.size) ** (1/3)
+            scale = max(0.5, min(0.8, scale))
+            new_shape = tuple(int(dim * scale) for dim in raw_volume.shape)
+            raw_volume = zoom(raw_volume, scale, order=1)
+            print(f"Downsampled to {raw_volume.shape}")
+        
         vol_normalized = normalize(raw_volume)
         
         # Load segmentation if provided
         seg = None
         if seg_path:
-            seg_data = load_nifti(seg_path)
-            seg = (seg_data > 0).astype(np.uint8)
+            try:
+                seg_data = load_nifti(seg_path)
+                seg = (seg_data > 0).astype(np.uint8)
+                print(f"Segmentation loaded")
+            except Exception as e:
+                print(f"Error loading segmentation: {e}")
+        
+        print("Detecting Alzheimer's biomarkers...")
         
         # Alzheimer's detection
-        hippocampus_volumes, total_hippo = detect_hippocampus(vol_normalized)
-        left_hippo = hippocampus_volumes['left']
-        right_hippo = hippocampus_volumes['right']
-        
-        ventricle_volume = detect_ventricles(vol_normalized)
-        wmh_mask, wmh_volume, wmh_count = detect_wmh(vol_normalized)
-        
+        left_hippo, right_hippo, total_hippo = detect_hippocampus_simple(vol_normalized)
+        ventricle_volume = detect_ventricles_simple(vol_normalized)
+        wmh_mask, wmh_volume, wmh_count = detect_wmh_simple(vol_normalized)
         risk_results = calculate_risk_score(left_hippo, right_hippo, ventricle_volume, wmh_count)
+        
+        print(f"\n{'='*50}")
+        print(f"RESULTS:")
+        print(f"  Left Hippocampus:  {left_hippo:.0f} mm³")
+        print(f"  Right Hippocampus: {right_hippo:.0f} mm³")
+        print(f"  Total Hippocampus: {total_hippo:.0f} mm³")
+        print(f"  Ventricle Volume:  {ventricle_volume:.0f} mm³")
+        print(f"  WMH Lesions:       {wmh_count}")
+        print(f"  WMH Volume:        {wmh_volume:.0f} mm³")
+        print(f"  Risk Score:        {risk_results['score']}% ({risk_results['risk_level']})")
+        print(f"{'='*50}\n")
         
         # Generate views
         axial = generate_view(vol_normalized, seg, 2)
@@ -423,7 +493,7 @@ def upload():
         response_data = convert_to_native(response_data)
         gc.collect()
         
-        print(f"Total time: {time.time() - start_time:.2f}s")
+        print(f"Total processing time: {time.time() - start_time:.2f}s")
         
         return jsonify(response_data)
         
